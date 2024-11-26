@@ -1,0 +1,183 @@
+--- org-run_ner.py	2024-06-10 11:14:46.866476100 +0200
++++ run_ner.py	2024-06-10 11:35:22.443100000 +0200
+@@ -20,11 +20,12 @@
+ import sys
+ from dataclasses import dataclass, field
+ from typing import Dict, List, Optional, Tuple, Union
+-
++from transformers.models.vit_mae.modeling_vit_mae import ViTMAESelfAttention
+ import numpy as np
+ import transformers
+ import wandb
+-
++from torch.utils.data import DataLoader
++import torch
+ from pixel import (
+     AutoConfig,
+     AutoModelForTokenClassification,
+@@ -37,6 +38,7 @@
+     PyGameTextRenderer,
+     get_transforms,
+     resize_model_embeddings,
++    PIXELSelfAttention,
+ )
+ from pixel.data.datasets.ner_dataset import get_labels as get_ner_labels
+ from pixel.data.datasets.ner_dataset import write_predictions_to_file as write_ner_predictions_to_file
+@@ -54,7 +56,7 @@
+ from transformers.trainer_utils import get_last_checkpoint, is_main_process
+ 
+ logger = logging.getLogger(__name__)
+-
++import torch_pruning as tp
+ 
+ @dataclass
+ class ModelArguments:
+@@ -109,7 +111,25 @@
+     dropout_prob: float = field(
+         default=0.1, metadata={"help": "Dropout probability for attention blocks and classification head"}
+     )
+-
++    pruning_type: Optional[str] = field(
++        default='l1',
++        metadata={"help": "Type of pruning to use. Options are 'random', 'taylor', 'l1'"}
++    )
++    pruning_ratio: float = field(
++        default=0.6, metadata={"help": "Pruning ratio for the model"}
++    )
++    test_accuracy: bool = field(
++        default=False, metadata={"help": "Whether to test accuracy before and after pruning"}
++    )
++    taylor_batches: int = field(
++        default=1, metadata={"help": "Number of batches for Taylor pruning"}
++    )
++    bottleneck: bool = field(
++        default=False, metadata={"help": "Whether to prune the bottleneck layer"}
++    )
++    save_as: Optional[str] = field(
++        default='pruned_model.bin', metadata={"help": "Path to save the pruned model"}
++    )
+     def __post_init__(self):
+         if not self.rendering_backend.lower() in ["pygame", "pangocairo"]:
+             raise ValueError("Invalid rendering backend. Supported backends are 'pygame' and 'pangocairo'.")
+@@ -250,16 +270,12 @@
+     return processor
+ 
+ 
++
+ def get_model_and_config(model_args: argparse.Namespace, labels: List[str]):
+     label_map: Dict[int, str] = {i: label for i, label in enumerate(labels)}
+     num_labels = len(labels)
+ 
+-    config_kwargs = {
+-        "cache_dir": model_args.cache_dir,
+-        "revision": model_args.model_revision,
+-        "use_auth_token": model_args.use_auth_token if model_args.use_auth_token else None,
+-    }
+-
++    # Define the configuration based on the parameters you provided
+     config = AutoConfig.from_pretrained(
+         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+         num_labels=num_labels,
+@@ -267,21 +283,77 @@
+         label2id={label: i for i, label in enumerate(labels)},
+         attention_probs_dropout_prob=model_args.dropout_prob,
+         hidden_dropout_prob=model_args.dropout_prob,
+-        **config_kwargs,
+     )
+-    logger.info(f"Using dropout with probability {model_args.dropout_prob}")
+ 
+-    if config.model_type in ["vit_mae", "pixel", "bert", "roberta"]:
++    # Instantiate the model with the custom configuration
+         model = AutoModelForTokenClassification.from_pretrained(
+-            model_args.model_name_or_path,
+-            config=config,
+-            **config_kwargs,
+-        )
+-    else:
+-        raise ValueError(f"Model type {config.model_type} not supported.")
++        model_args.config_name if model_args.config_name else model_args.model_name_or_path,ignore_mismatched_sizes=True,
++        config=config)  # Use CustomViTMAEForPreTraining instead of ViTMAEForPreTraining
++
++    logger.info(f"Using dropout with probability {config.attention_probs_dropout_prob}")
+ 
+     return model, config
+ 
++def prune_model(model, model_args, train_dataset, training_args):
++    # Extract height and width from model.config.image_size
++    image_size = model.config.image_size
++    height, width = image_size if isinstance(image_size, list) else (image_size, image_size)
++    
++    # Assuming the model expects input in the form [batch_size, num_channels, height, width]
++    example_inputs = torch.randn(1, 3, height, width).to(training_args.device)
++
++    # Define the importance metric
++    if model_args.pruning_type == 'random':
++        imp = tp.importance.RandomImportance()
++    elif model_args.pruning_type == 'taylor':
++        imp = tp.importance.TaylorImportance()
++    elif model_args.pruning_type == 'l1':
++        imp = tp.importance.MagnitudeImportance(p=1)
++    else:
++        raise NotImplementedError(f"Pruning type {model_args.pruning_type} is not implemented.")
++
++    pruner = tp.pruner.MetaPruner(
++        model=model,
++        example_inputs=example_inputs,
++        importance=imp,
++        pruning_ratio=model_args.pruning_ratio,
++        global_pruning=False,
++        prune_head_dims=True,
++        prune_num_heads=False,
++        iterative_steps = 1,
++        ignored_layers=[model.classifier],        
++    )
++
++    if isinstance(imp, tp.importance.TaylorImportance):
++        model.zero_grad()
++        train_loader = DataLoader(train_dataset, batch_size=training_args.train_batch_size)
++        for step, batch in enumerate(train_loader):
++            if step >= model_args.taylor_batches:
++                break
++            batch = {k: v.to(training_args) for k, v in batch.items()}
++            outputs = model(**batch)
++            loss = outputs.loss
++            loss.backward()
++    
++    for _ in pruner.step(interactive=True):
++        pass
++    for m in model.modules():
++        if isinstance(m, ViTMAESelfAttention):
++            print(m)
++            print("num_heads:", m.num_attention_heads, 'head_dims:', m.attention_head_size, 'all_head_size:', m.all_head_size, '=>')
++            m.num_attention_heads = pruner.num_heads[m.query]
++            m.attention_head_size = m.query.out_features // m.num_attention_heads
++            m.all_head_size = m.query.out_features
++            print("num_heads:", m.num_attention_heads, 'head_dims:', m.attention_head_size, 'all_head_size:', m.all_head_size)
++            print()
++    print("pruning done")
++    # Save the pruned model
++    print("Saving the pruned model to %s..."%model_args.save_as)
++    os.makedirs(os.path.dirname(model_args.save_as), exist_ok=True)
++    model.zero_grad()
++    torch.save(model, model_args.save_as)
++    return model
++
+ 
+ def main():
+ 
+@@ -409,6 +481,7 @@
+ 
+     # Training
+     if training_args.do_train:
++        model = prune_model(model, model_args, train_dataset, training_args)
+         checkpoint = None
+         if training_args.resume_from_checkpoint is not None:
+             checkpoint = training_args.resume_from_checkpoint
+@@ -464,6 +537,7 @@
+     return results
+ 
+ 
++
+ def _mp_fn(index):
+     # For xla_spawn (TPUs)
+     main()

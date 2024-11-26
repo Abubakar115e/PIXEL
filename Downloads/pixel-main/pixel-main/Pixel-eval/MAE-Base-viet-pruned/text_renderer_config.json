@@ -1,0 +1,25 @@
+{
+  "background_color": "white",
+  "dpi": 120,
+  "font_color": "black",
+  "font_file": "GoNotoCurrent.ttf",
+  "font_size": 8,
+  "fonts_list": [
+    "DejaVu Sans",
+    "DejaVu Sans Mono",
+    "DejaVu Serif",
+    "Go Noto Current",
+    "Monospace",
+    "Sans",
+    "Serif",
+    "System-ui",
+    "Ubuntu",
+    "Ubuntu Condensed",
+    "Ubuntu Mono"
+  ],
+  "max_seq_length": 256,
+  "pad_size": 3,
+  "pixels_per_patch": 16,
+  "rgb": false,
+  "text_renderer_type": "PangoCairoTextRenderer"
+}
