@@ -216,21 +216,3 @@ Notes:
 
 </details>
 
-### Citation & Contact
-
-```bibtex
-@inproceedings{rust-etal-2023-pixel,
-  title={Language Modelling with Pixels},
-  author={Phillip Rust and Jonas F. Lotz and Emanuele Bugliarello and Elizabeth Salesky and Miryam de Lhoneux and Desmond Elliott},
-  booktitle={The Eleventh International Conference on Learning Representations},
-  year={2023},
-  url={https://openreview.net/forum?id=FkSp8VW8RjH}
-}
-```
-
-Feel free to open an issue here or send an email to ask questions about PIXEL or report problems with the code! We emphasize that this is experimental research code.
-
-**Contact person:**
-Phillip Rust (p.rust@di.ku.dk)
-
-If you find this repo useful, we would also be happy about a ⭐️ :).
