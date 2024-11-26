@@ -1,1 +1,1 @@
-This a repo for the Bachelor Project
+# This a repo for my Bachelor Project in Copenhagen University
